@@ -1,0 +1,352 @@
+---
+title: "Predicting the weight of new born babies"
+author: "Cynara Nyahoda, Tendai Makuwerere"
+date: "2/14/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+
+### Introduction
+
+In this project, we will predict the weight of new born babies using three different regression models and ultimately selecting the best performing model amongst the three. The variables that are used to predict the new born weights are primarily attributes about the mother.
+
+The data set we are using has 101400 rows (samples) and 37 columns (variables) where each sample signifies a unique case of a new born baby.The last column in the data set, the BWEIGHT, is what our models will be trained to predict.   
+
+
+### Data Preparation
+
+#### Install and loading necessary packages
+
+```{r}
+requiredPackages = c("dplyr","caret" , "glmnet", "ggplot2", "tidypredict","tidyverse", "corrplot", "olsrr", "pROC", "gbm", "tree")
+
+for(i in requiredPackages){if(!require(i,character.only = TRUE)) install.packages(i)}
+for(i in requiredPackages){if(!require(i,character.only = TRUE)) library(i,character.only = TRUE)}
+```
+
+The data set was taken from kaggle and is available [here](https://www.kaggle.com/c/birth-weight-prediction/data?select=baby-weights-dataset.csv)
+
+```{r}
+setwd('C:\\Users\\Mark Asamoah\\OneDrive\\Desktop\\Cynara\\ML2\\birth-weight-prediction')
+baby_weight <- read.csv("baby-weights.csv", header = TRUE)
+head(baby_weight,10) # the top 10 rows
+```
+
+```{r}
+tail(baby_weight,10) #the bottom 10 rows
+```
+```{r}
+str(baby_weight)
+```
+Below we will perform exploratory data analysis to get a general statistical view of the dataset.
+
+#### Missing data(NA)
+
+```{r}
+sum(is.na(baby_weight))
+
+```
+Our data has 5 NA's, therefore we will remove them since their impact on the data is insignificant.
+
+```{r}
+baby_weight <- na.omit(baby_weight)
+sum(is.na(baby_weight))
+```
+ 
+#### Outliers
+
+Checking for extreme outliers is important because they can affect the accuracy of our model. A statistical analysis will be appropriate for this check.
+
+```{r}
+summary(baby_weight)
+```
+
+
+
+```{r}
+library(reshape)
+meltData <- melt(baby_weight)
+p <- ggplot(meltData, aes(factor(variable), value)) 
+p + geom_boxplot() + facet_wrap(~variable, scale="free")
+```
+
+
+Although some variables contain outliers, we will not remove them as they neither affect the results nor the assumptions.
+
+### Distribution of the dependent variable
+
+From plotting the distribution of the dependent variable BWEIGHT, we can see that the distribution is left skewed. Meaning that quite a number of baby weights are within the lower quartile of the distribution. 
+
+
+```{r}
+ggplot(baby_weight,
+       aes(x = BWEIGHT)) +
+  geom_histogram(fill = "blue",
+                 bins = 100) +
+  theme_bw()
+
+```
+
+
+### Removing single level variables
+
+```{r}
+vars_selected <-names(baby_weight)
+var_to_remove <- nearZeroVar(baby_weight, 
+                                      names = TRUE)
+
+var_to_remove
+
+```
+
+
+```{r}
+vars_selected <- names(baby_weight)[
+  !names(baby_weight) %in% var_to_remove
+]
+
+baby_weight <- baby_weight[,vars_selected]
+```
+
+
+
+### Removing strongly correlated independent variables
+
+Strongly correlated variables by virtue that they move in the same direction, do not have much of a significance in improving the results of a model, hence why they are normally removed.Before we can check and remove any strongly correlated variables, we will make non-numeric variables NULL.
+
+
+```{r}
+
+# Remove the columns that are not numeric
+
+baby_weight$HISPMOM <- NULL
+baby_weight$HISPDAD <- NULL
+baby_weight$ID <- NULL 
+
+baby_weight_correlations <- cor(baby_weight,
+    use = "pairwise.complete.obs")
+
+baby_weight_cor_order <- 
+  baby_weight_correlations[,"BWEIGHT"] %>% 
+  sort(decreasing = TRUE) %>% # sort the correlations with BWEIGHT in decreasing order
+  names()
+```
+
+#### Plotting correlations
+
+```{r}
+corrplot.mixed(baby_weight_correlations[baby_weight_cor_order, 
+                                   baby_weight_cor_order],
+               upper = "square",
+               lower = "number",
+               tl.col = "black",
+               tl.pos = "lt")
+```
+
+The variables that have the darkest shade of blue squares are strongly correlated.We ought to remove some of them.
+
+```{r}
+vars_to_remove <- findCorrelation(baby_weight_correlations[-8,-8],
+                cutoff = 0.7, # threshold
+                names = TRUE)
+
+vars_selected <- names(baby_weight)[
+  !names(baby_weight) %in% vars_to_remove
+]
+
+```
+Two variables have been removed,that is 'MAGE' and 'RACEDAD'.
+
+
+```{r}
+
+baby_weight <- baby_weight[,vars_selected]
+
+```
+
+### Removing Insignificant variables
+
+Insignificant variables will not improve our models in any way hence they can be removed using automated backward elimination to improve the efficiency of the task.
+
+1. Running the linear model with all variables
+
+```{r}
+
+modelWithallVars <- lm(BWEIGHT ~ .,
+                          data = baby_weight %>%
+                            dplyr::select(all_of(vars_selected))) 
+```
+
+2. Removing insignificant variables (i.e variables with p-value < 0.05).
+
+```{r}
+Model_varsRemoved <- ols_step_backward_p(modelWithallVars,
+                    prem = 0.05, # p-value threshold
+                    progress = FALSE) # hide progress
+
+```
+
+3. Removing recommended variables
+```{r}
+
+vars_to_remove <- Model_varsRemoved$removed
+vars_selected <- vars_selected[!vars_selected %in% vars_to_remove]
+
+```
+
+The variable "FEDUC" was insignificant, therefore it has been removed. All the variables left are significant.
+
+
+### Training & testing Regression Models
+
+In this project we will be comparing 3 different regression models, including Linear regression, gradient boosting and tree regression model. The baby_weight data set will split into two. 70% of the data set will be used for training and 30% will be used as the test data.
+
+```{r}
+seed <- 123489065
+set.seed(seed)
+datapart <- createDataPartition(baby_weight$BWEIGHT, 
+                                    p = 0.70, 
+                                    list = FALSE)
+baby_weight.train <- baby_weight[datapart,]
+baby_weight.test  <- baby_weight[-datapart,]
+
+
+```
+
+### Models {.tabset}
+
+
+### Simple linear regression
+
+The simple linear regression model estimates the linear relationship between an independent variable and a dependent variable.
+
+
+```{r}
+
+Baby_weight.lm <- lm(BWEIGHT ~ .,
+                data = baby_weight.train)
+
+Baby_weight.lm.pred <- predict(Baby_weight.lm,
+                          newdata = baby_weight.test)
+mean((Baby_weight.lm.pred   - baby_weight.test$BWEIGHT) ^ 2)
+
+```
+
+
+
+#### Gradient Boosting
+
+```{r}
+set.seed(seed)
+baby_weight.gbm <- gbm(BWEIGHT ~ ., 
+                  data = baby_weight.train, 
+                  distribution = "gaussian",
+                  n.trees = 500,
+                  interaction.depth = 4)
+
+baby_weight.gbm.pred <- predict(baby_weight.gbm,
+                           newdata = baby_weight.test,
+                           n.trees = 500)
+mean((baby_weight.gbm.pred - baby_weight.test$BWEIGHT) ^ 2)
+
+```
+
+#### Tree regression model
+
+```{r}
+
+baby_weight.tree <- tree(BWEIGHT ~ . , 
+                    data = baby_weight.train)
+baby_weight.tree.pred <- predict(baby_weight.tree,
+                            newdata = baby_weight.test)
+mean((baby_weight.tree.pred   - baby_weight.test$BWEIGHT) ^ 2)
+
+
+```
+
+### Summary 
+
+We will summarize the statistics of the models applied to our data so we can compare and analyze the performance of each model based on the statistical results.
+
+```{r}
+
+# summarizes popular error measures
+getRegressionMetrics <- function(real, predicted) {
+  
+  
+  # Mean Square Error
+  MSE <- mean((real - predicted)^2)
+  
+  # Root Mean Square Error
+  RMSE <- sqrt(MSE)
+  
+  # Mean Absolute Error
+  MAE <- mean(abs(real - predicted))
+  
+  # Median Absolute Error
+  MedAE <- median(abs(real - predicted))
+  
+  # Mean Logarithmic Absolute Error
+  MSLE <- mean((log(1 + real) - log(1 + predicted))^2)
+  
+  # Total Sum of Squares
+  TSS <- sum((real - mean(real))^2)
+  
+  # Explained Sum of Squares
+  RSS <- sum((predicted - real)^2)
+  
+  # R2
+  R2 <- 1 - RSS/TSS
+  
+  result <- data.frame(MSE, RMSE, MAE, MedAE, MSLE, R2)
+  return(result)
+}
+
+```
+
+#### Summary on training data
+
+
+
+```{r}
+
+bind_cols(tibble(baby_weight.tree    =  predict(baby_weight.tree, baby_weight.train),
+                 baby_weight.gbm =  predict(baby_weight.gbm, baby_weight.train),
+                 Baby_weight.lm = predict(Baby_weight.lm, baby_weight.train),
+                 
+  )) %>%
+  map_dfr(getRegressionMetrics, real = baby_weight.train$BWEIGHT, .id = "Model")
+
+```
+```{r}
+
+bind_cols(tibble(baby_weight.tree    =  predict(baby_weight.tree, baby_weight.test),
+                 baby_weight.gbm =  predict(baby_weight.gbm, baby_weight.test),
+                 Baby_weight.lm = predict(Baby_weight.lm, baby_weight.test),
+                 
+  )) %>%
+  map_dfr(getRegressionMetrics, real = baby_weight.test$BWEIGHT, .id = "Model")
+
+```
+
+
+### Conclusion
+
+Looking at the R2 results from all 3 models we can see that none of the models are performing well since none of them have an R2 that is above 0.5. This may be due to missing information in the data that possibly affects baby weights more than the available variables used. However, on both the train and test data sets, the Gradient boosting model outperformed the other 2 models. 
+
+Based on the Mean Square Error (MSE), the Gradient boosting model has the lowest MSE in both the train and test data, therefore, it still is the better performing model. 
+
+The Root Mean Square Error (RMSE) is a measure of absolute fit. When comparing the RMSE from the test data to that of the train data, we observe that the RMSE in the training data set is higher than that in the testing data set. Although the difference is not very significant, it poses a problem because it shows that our models are over fitting. Hence, they test well in the train data but have very little predictive value when tested on the test data. 
+
+If we consider the Median Absolute Error (MAE), the Gradient boosting model has the lowest value, validating that it is the best performing model among the three regression models.
+
+In conclusion, all the models under-performed, however, the gradient boosting model perfomed better that the others, thus it is the recommended model for this data set. 
+
+
+
